@@ -1,0 +1,105 @@
+diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
+index ae7b95e15ac7..d03cb43d19fa 100644
+--- a/drivers/cpufreq/cpufreq.c
++++ b/drivers/cpufreq/cpufreq.c
+@@ -966,6 +966,8 @@ static ssize_t store(struct kobject *kobj, struct attribute *attr,
+ 	struct freq_attr *fattr = to_attr(attr);
+ 	ssize_t ret = -EINVAL;
+ 
++	pr_info("store_%s, %s, %d\n", attr->name, buf, count);
++
+ 	if (!fattr->store)
+ 		return -EIO;
+ 
+diff --git a/drivers/cpufreq/intel_pstate.c b/drivers/cpufreq/intel_pstate.c
+index eee74a2fe317..fd69b6585d47 100644
+--- a/drivers/cpufreq/intel_pstate.c
++++ b/drivers/cpufreq/intel_pstate.c
+@@ -730,6 +730,8 @@ static int intel_pstate_set_energy_pref_index(struct cpudata *cpu_data,
+ 		else if (epp == -EINVAL)
+ 			epp = epp_values[pref_index - 1];
+ 
++		pr_info("%s: hwp_request epp=0x%x, pref_index=%d, use_raw=%d\n", __FUNCTION__, epp, pref_index, use_raw);
++		
+ 		/*
+ 		 * To avoid confusion, refuse to set EPP to any values different
+ 		 * from 0 (performance) if the current policy is "performance",
+@@ -921,6 +923,7 @@ static void intel_pstate_hwp_set(unsigned int cpu)
+ 		min = max;
+ 
+ 	rdmsrl_on_cpu(cpu, MSR_HWP_REQUEST, &value);
++	pr_info("%s: read hwp_request=0x%llx\n", __FUNCTION__, value);
+ 
+ 	value &= ~HWP_MIN_PERF(~0L);
+ 	value |= HWP_MIN_PERF(min);
+@@ -928,6 +931,8 @@ static void intel_pstate_hwp_set(unsigned int cpu)
+ 	value &= ~HWP_MAX_PERF(~0L);
+ 	value |= HWP_MAX_PERF(max);
+ 
++	pr_info("%s: update hwp_request=0x%llx\n", __FUNCTION__, value);
++
+ 	if (cpu_data->epp_policy == cpu_data->policy)
+ 		goto skip_epp;
+ 
+@@ -942,6 +947,7 @@ static void intel_pstate_hwp_set(unsigned int cpu)
+ 
+ 		epp = 0;
+ 	} else {
++		pr_info("%s: check epp_powersave x%x\n", __FUNCTION__, cpu_data->epp_powersave);
+ 		/* skip setting EPP, when saved value is invalid */
+ 		if (cpu_data->epp_powersave < 0)
+ 			goto skip_epp;
+@@ -962,11 +968,13 @@ static void intel_pstate_hwp_set(unsigned int cpu)
+ 	if (boot_cpu_has(X86_FEATURE_HWP_EPP)) {
+ 		value &= ~GENMASK_ULL(31, 24);
+ 		value |= (u64)epp << 24;
++		pr_info("%s: update hwp_request=0x%llx\n", __FUNCTION__, value);
+ 	} else {
+ 		intel_pstate_set_epb(cpu, epp);
+ 	}
+ skip_epp:
+ 	WRITE_ONCE(cpu_data->hwp_req_cached, value);
++	pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, value);
+ 	wrmsrl_on_cpu(cpu, MSR_HWP_REQUEST, value);
+ }
+ 
+@@ -1010,6 +1018,7 @@ static void intel_pstate_hwp_offline(struct cpudata *cpu)
+ 	if (boot_cpu_has(X86_FEATURE_HWP_EPP))
+ 		value |= HWP_ENERGY_PERF_PREFERENCE(HWP_EPP_POWERSAVE);
+ 
++	pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, value);
+ 	wrmsrl_on_cpu(cpu->cpu, MSR_HWP_REQUEST, value);
+ }
+ 
+@@ -1040,6 +1049,7 @@ static void intel_pstate_hwp_enable(struct cpudata *cpudata);
+ static void intel_pstate_hwp_reenable(struct cpudata *cpu)
+ {
+ 	intel_pstate_hwp_enable(cpu);
++	pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, cpu->hwp_req_cached);
+ 	wrmsrl_on_cpu(cpu->cpu, MSR_HWP_REQUEST, READ_ONCE(cpu->hwp_req_cached));
+ }
+ 
+@@ -1916,6 +1926,7 @@ static inline void intel_pstate_hwp_boost_up(struct cpudata *cpu)
+ 		return;
+ 
+ 	hwp_req = (hwp_req & ~GENMASK_ULL(7, 0)) | cpu->hwp_boost_min;
++	pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, hwp_req);
+ 	wrmsrl(MSR_HWP_REQUEST, hwp_req);
+ 	cpu->last_update = cpu->sample.time;
+ }
+@@ -1929,6 +1940,7 @@ static inline void intel_pstate_hwp_boost_down(struct cpudata *cpu)
+ 		expired = time_after64(cpu->sample.time, cpu->last_update +
+ 				       hwp_boost_hold_time_ns);
+ 		if (expired) {
++			pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, cpu->hwp_req_cached);
+ 			wrmsrl(MSR_HWP_REQUEST, cpu->hwp_req_cached);
+ 			cpu->hwp_boost_min = 0;
+ 		}
+@@ -2667,6 +2679,7 @@ static void intel_cpufreq_hwp_update(struct cpudata *cpu, u32 min, u32 max,
+ 		return;
+ 
+ 	WRITE_ONCE(cpu->hwp_req_cached, value);
++	pr_info("%s: write hwp_request=0x%llx\n", __FUNCTION__, value);
+ 	if (fast_switch)
+ 		wrmsrl(MSR_HWP_REQUEST, value);
+ 	else
