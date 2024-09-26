@@ -1,0 +1,203 @@
+From bfdd6a3c8a5c045cf93ed77cb4fbe7293a39cc45 Mon Sep 17 00:00:00 2001
+From: Wu Zhou <wu.zhou@intel.com>
+Date: Mon, 8 Jan 2024 16:38:27 +0800
+Subject: [PATCH] kernel: support steal time
+
+Add steal time in acrn driver for both service VM and user VM.
+This patch was original created by Conghui <conghui.chen@intel.com>
+
+Signed-off-by: Wu Zhou <wu.zhou@intel.com>
+---
+ arch/x86/include/asm/acrn.h |  11 ++++
+ arch/x86/kernel/cpu/acrn.c  | 112 ++++++++++++++++++++++++++++++++++++
+ kernel/sched/cputime.c      |   1 +
+ kernel_config_service_vm    |   1 +
+ kernel_config_user_vm       |   2 +
+ 5 files changed, 127 insertions(+)
+
+diff --git a/arch/x86/include/asm/acrn.h b/arch/x86/include/asm/acrn.h
+index 601cbcb51..5747c4889 100644
+--- a/arch/x86/include/asm/acrn.h
++++ b/arch/x86/include/asm/acrn.h
+@@ -26,6 +26,17 @@
+ void acrn_setup_intr_handler(void (*handler)(void));
+ void acrn_remove_intr_handler(void);
+ 
++#define MSR_ACRN_STEAL_TIME	0xc0000030
++
++struct acrn_steal_time {
++	__u64 steal;
++	__u32 version;
++	__u32 flags;
++	__u8  preempted;
++	__u8  u8_pad[3];
++	__u32 pad[11];
++};
++
+ static inline u32 acrn_cpuid_base(void)
+ {
+ 	if (boot_cpu_has(X86_FEATURE_HYPERVISOR))
+diff --git a/arch/x86/kernel/cpu/acrn.c b/arch/x86/kernel/cpu/acrn.c
+index 485441b7f..0805f1579 100644
+--- a/arch/x86/kernel/cpu/acrn.c
++++ b/arch/x86/kernel/cpu/acrn.c
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <linux/interrupt.h>
++#include <linux/cpuhotplug.h>
+ 
+ #include <asm/acrn.h>
+ #include <asm/apic.h>
+@@ -19,13 +20,18 @@
+ #include <asm/idtentry.h>
+ #include <asm/irq_regs.h>
+ 
++DEFINE_PER_CPU_DECRYPTED(struct acrn_steal_time, steal_time) __aligned(64) __visible;
++static int has_steal_clock = 0;
++
+ static u32 __init acrn_detect(void)
+ {
++	pr_info("ACRN acrn_detect ");
+ 	return acrn_cpuid_base();
+ }
+ 
+ static void __init acrn_init_platform(void)
+ {
++	pr_info("ACRN acrn_init_platform");
+ 	/* Setup the IDT for ACRN hypervisor callback */
+ 	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_acrn_hv_callback);
+ 
+@@ -72,10 +78,116 @@ void acrn_remove_intr_handler(void)
+ }
+ EXPORT_SYMBOL_GPL(acrn_remove_intr_handler);
+ 
++static int steal_acc = 1;
++static __init int activate_jump_labels(void)
++{
++	if (has_steal_clock) {
++		static_key_slow_inc(&paravirt_steal_enabled);
++		if (steal_acc)
++			static_key_slow_inc(&paravirt_steal_rq_enabled);
++	}
++
++	return 0;
++}
++arch_initcall(activate_jump_labels);
++
++static u64 acrn_steal_clock(int cpu)
++{
++	u64 steal;
++	struct acrn_steal_time *src;
++
++	src = &per_cpu(steal_time, cpu);
++
++	virt_rmb();
++	steal = src->steal;
++	virt_rmb();
++
++	//trace_printk("steal clock %lld src=%llx address=%llx\n", steal, src, (unsigned long long)(slow_virt_to_phys(src)));
++	return steal;
++}
++
++static void acrn_guest_cpu_init(void)
++{
++
++	int cpu = smp_processor_id();
++	struct acrn_steal_time *st = &per_cpu(steal_time, cpu);
++
++	if (!has_steal_clock)
++		return;
++
++	pr_info("write msr for acrn steal time \n");
++	wrmsrl(MSR_ACRN_STEAL_TIME, (slow_virt_to_phys(st)));
++
++	pr_info("acrn-stealtime: cpu %d, msr<%x> %llx  %llx\n",
++		cpu, MSR_ACRN_STEAL_TIME, (unsigned long long)slow_virt_to_phys(st), (unsigned long long)st);
++}
++
++static inline void __set_percpu_decrypted(void *ptr, unsigned long size)
++{
++	early_set_memory_decrypted((unsigned long) ptr, size);
++}
++
++static void __init sev_map_percpu_data(void)
++{
++	int cpu;
++
++	if (!sev_active())
++		return;
++
++	for_each_possible_cpu(cpu) {
++		__set_percpu_decrypted(&per_cpu(steal_time, cpu), sizeof(steal_time));
++	}
++}
++static void __init acrn_smp_prepare_boot_cpu(void)
++{
++	sev_map_percpu_data();
++	acrn_guest_cpu_init();
++	native_smp_prepare_boot_cpu();
++}
++
++static void acrn_guest_cpu_offline(void)
++{
++	// TODO, clean steal time
++}
++
++static int acrn_cpu_online(unsigned int cpu)
++{
++	local_irq_disable();
++	acrn_guest_cpu_init();
++	local_irq_enable();
++	return 0;
++}
++
++static int acrn_cpu_down_prepare(unsigned int cpu)
++{
++	local_irq_disable();
++	acrn_guest_cpu_offline();
++	local_irq_enable();
++	return 0;
++}
++
++static void __init acrn_guest_init(void)
++{
++	pr_info("ACRN guest init ");
++	has_steal_clock = 1;
++	static_call_update(pv_steal_clock, acrn_steal_clock);
++
++#ifdef CONFIG_SMP
++	smp_ops.smp_prepare_boot_cpu = acrn_smp_prepare_boot_cpu;
++
++	if (cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN, "x86/acrn:online",
++				      acrn_cpu_online, acrn_cpu_down_prepare) < 0)
++		pr_err("acrn_guest: Failed to install cpu hotplug callbacks\n");
++#else
++	acrn_guest_cpu_init();
++#endif
++}
++
+ const __initconst struct hypervisor_x86 x86_hyper_acrn = {
+ 	.name                   = "ACRN",
+ 	.detect                 = acrn_detect,
+ 	.type			= X86_HYPER_ACRN,
++	.init.guest_late_init	= acrn_guest_init,
+ 	.init.init_platform     = acrn_init_platform,
+ 	.init.x2apic_available  = acrn_x2apic_available,
+ };
+diff --git a/kernel/sched/cputime.c b/kernel/sched/cputime.c
+index 042a6dbce..6e9327b26 100644
+--- a/kernel/sched/cputime.c
++++ b/kernel/sched/cputime.c
+@@ -243,6 +243,7 @@ static __always_inline u64 steal_account_process_time(u64 maxtime)
+ 		steal = min(steal, maxtime);
+ 		account_steal_time(steal);
+ 		this_rq()->prev_steal_time += steal;
++		trace_printk("steal_account_process_time steal=%lld", steal);
+ 
+ 		return steal;
+ 	}
+
+-- 
+2.34.1
+
